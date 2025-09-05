@@ -1,0 +1,11 @@
+# Ruff configuration
+
+# Prefer longer, single-line expressions when readable.
+line-length = 144
+
+# Optional: set your Python target version for more precise linting/formatting.
+# target-version = "py310"
+
+# You can enable Ruff's formatter (ruff format) alongside this line length.
+# [format]
+# quote-style = "preserve"
