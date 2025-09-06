@@ -30,8 +30,8 @@ import torch
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from tinystories import Task
-from export import model_export
+import glob
+import numpy as np
 
 import inspect
 from dataclasses import dataclass
@@ -40,6 +40,78 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+
+def _peek_data_shard(filename):
+    # only reads the header, returns header data
+    with open(filename, "rb") as f:
+        # first read the header, which is 256 int32 integers (4 bytes each)
+        header = np.frombuffer(f.read(256 * 4), dtype=np.int32)
+    if header[0] != 20240520:
+        print("ERROR: magic number mismatch in the data .bin file!")
+        print("---> HINT: Are you passing in a correct file with --input_bin?")
+        print("---> HINT: Dataset encoding changed recently, re-run data prepro or refer again to README")
+        print("---> HINT: For example re-run: `python dev/data/tinyshakespeare.py`, then re-try")
+        exit(1)
+    assert header[1] == 1, "unsupported version"
+    ntok = header[2]  # number of tokens (claimed)
+    return ntok  # for now just return the number of tokens
+
+
+def _load_data_shard(filename):
+    with open(filename, "rb") as f:
+        # first read the header, which is 256 int32 integers (4 bytes each)
+        header = np.frombuffer(f.read(256 * 4), dtype=np.int32)
+        assert header[0] == 20240520, "magic number mismatch in the data .bin file"
+        assert header[1] == 1, "unsupported version"
+        ntok = header[2]  # number of tokens (claimed)
+        # the rest of it are tokens, stored as uint16
+        tokens = np.frombuffer(f.read(), dtype=np.uint16)
+    assert len(tokens) == ntok, "number of tokens read does not match header?"
+    return tokens
+
+
+class DistributedDataLoader:
+    def __init__(self, filename_pattern, B, T, process_rank, num_processes):
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        self.B = B
+        self.T = T
+        # glob files that match the pattern
+        self.files = sorted(glob.glob(filename_pattern))
+        assert len(self.files) > 0, f"did not find any files that match the pattern {filename_pattern}"
+        # load and validate all data shards, count number of tokens in total
+        ntok_total = 0
+        for fname in self.files:
+            shard_ntok = _peek_data_shard(fname)
+            assert shard_ntok >= num_processes * B * T + 1
+            ntok_total += int(shard_ntok)
+        self.ntok_total = ntok_total
+        # kick things off
+        self.reset()
+
+    def reset(self):
+        self.current_shard = 0
+        self.current_position = self.process_rank * self.B * self.T
+        self.tokens = _load_data_shard(self.files[self.current_shard])
+
+    def advance(self):  # advance to next data shard
+        self.current_shard = (self.current_shard + 1) % len(self.files)
+        self.current_position = self.process_rank * self.B * self.T
+        self.tokens = _load_data_shard(self.files[self.current_shard])
+
+    def next_batch(self):
+        B = self.B
+        T = self.T
+        buf = self.tokens[self.current_position : self.current_position + B * T + 1]
+        buf = torch.tensor(buf.astype(np.int32), dtype=torch.long)
+        x = (buf[:-1]).view(B, T)  # inputs
+        y = (buf[1:]).view(B, T)  # targets
+        # advance current position and load next shard if necessary
+        self.current_position += B * T * self.num_processes
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.advance()
+        return x.cuda(), y.cuda()
 
 
 @dataclass
@@ -141,13 +213,12 @@ class Attention(nn.Module):
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
 
-        # use flash attention or a manual implementation?
-        self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
-            mask = torch.triu(mask, diagonal=1)
-            self.register_buffer("mask", mask)
+        # use manual implementation to avoid compilation issues
+        self.flash = False
+        print("Using manual attention implementation for compatibility")
+        mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
+        mask = torch.triu(mask, diagonal=1)
+        self.register_buffer("mask", mask)
 
     def forward(
         self,
@@ -392,32 +463,34 @@ eval_only = False  # if True, script exits right after the first eval
 always_save_checkpoint = False  # if True, always save a checkpoint after each eval
 init_from = "scratch"  # 'scratch' or 'resume'
 # data
-batch_size = 128  # if gradient_accumulation_steps > 1, this is the micro-batch size
-max_seq_len = 256
-vocab_source = "llama2"  # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
-vocab_size = 32000  # the Llama 2 tokenizer has 32K tokens
-# model
-dim = 288
-n_layers = 6
-n_heads = 6
-n_kv_heads = 6
-multiple_of = 32
+batch_size = 4  # batch size in sequences per device, reduced for safety
+max_seq_len = 1024  # sequence length, reduced to fit memory better
+train_data_path = "data/fineweb10B/fineweb_train_*.bin"
+val_data_path = "data/fineweb10B/fineweb_val_*.bin"
+vocab_source = "custom"  # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
+vocab_size = 50257  # GPT-2 tokenizer size for FineWeb compatibility
+# model - ~6B configuration to fit in H100 memory
+dim = 4096
+n_layers = 12
+n_heads = 32
+n_kv_heads = 32  # Use regular multi-head attention (not grouped query)
+multiple_of = 256
 dropout = 0.0
 # adamw optimizer
-gradient_accumulation_steps = 4  # used to simulate larger batch sizes
-learning_rate = 5e-4  # max learning rate
-max_iters = 100000  # total number of training iterations
+gradient_accumulation_steps = 8  # used to simulate larger batch sizes for 7B
+learning_rate = 3e-4  # max learning rate for large models
+max_iters = 100  # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True  # whether to decay the learning rate
-warmup_iters = 1000  # how many steps to warm up for
+warmup_iters = min(1000, max_iters // 10)  # how many steps to warm up for
 # system
 device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = "bfloat16"  # float32|bfloat16|float16
-compile = True  # use PyTorch 2.0 to compile the model to be faster
+compile = False  # disable compilation to avoid attention dimension issues
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith("_") and isinstance(v, (int, float, bool, str))]
 exec(open("configurator.py").read())  # overrides from command line or config file
@@ -471,16 +544,13 @@ ptdtype = {
 }[dtype]
 ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-# task-specific setup
-iter_batches = partial(
-    Task.iter_batches,
-    batch_size=batch_size,
-    max_seq_len=max_seq_len,
-    vocab_size=vocab_size,
-    vocab_source=vocab_source,
-    device=device,
-    num_workers=0,
-)
+# data loader setup
+if ddp:
+    train_loader = DistributedDataLoader(train_data_path, batch_size, max_seq_len, ddp_rank, ddp_world_size)
+    val_loader = DistributedDataLoader(val_data_path, batch_size, max_seq_len, ddp_rank, ddp_world_size)
+else:
+    train_loader = DistributedDataLoader(train_data_path, batch_size, max_seq_len, 0, 1)
+    val_loader = DistributedDataLoader(val_data_path, batch_size, max_seq_len, 0, 1)
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -565,10 +635,10 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ["train", "val"]:
-        batch_iter = iter_batches(split=split)
+        loader = train_loader if split == "train" else val_loader
         losses = torch.zeros(eval_iters)  # keep on CPU
         for k in range(eval_iters):
-            X, Y = next(batch_iter)
+            X, Y = loader.next_batch()
             with ctx:
                 logits = model(X, Y)
                 loss = raw_model.last_loss
@@ -596,8 +666,7 @@ def get_lr(it):
 # logging
 
 # training loop
-train_batch_iter = iter_batches(split="train")
-X, Y = next(train_batch_iter)  # fetch the very first batch
+X, Y = train_loader.next_batch()  # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
@@ -625,7 +694,6 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
-                model_export(raw_model, os.path.join(out_dir, "model.bin"), version=0)
     if iter_num == 0 and eval_only:
         break
 
@@ -643,7 +711,7 @@ while True:
             loss = raw_model.last_loss
             loss = loss / gradient_accumulation_steps
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = next(train_batch_iter)
+        X, Y = train_loader.next_batch()
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
