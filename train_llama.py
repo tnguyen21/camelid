@@ -480,7 +480,7 @@ dropout = 0.0
 # adamw optimizer
 gradient_accumulation_steps = 8  # used to simulate larger batch sizes for 7B
 learning_rate = 3e-4  # max learning rate for large models
-max_iters = 100  # total number of training iterations
+max_iters = 1000  # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -492,11 +492,6 @@ warmup_iters = min(1000, max_iters // 10)  # how many steps to warm up for
 device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = "bfloat16"  # float32|bfloat16|float16
 compile = False  # disable compilation to avoid attention dimension issues
-# -----------------------------------------------------------------------------
-config_keys = [k for k, v in globals().items() if not k.startswith("_") and isinstance(v, (int, float, bool, str))]
-exec(open("configurator.py").read())  # overrides from command line or config file
-config = {k: globals()[k] for k in config_keys}  # will be useful for logging
-# -----------------------------------------------------------------------------
 
 # fixing some hyperparams to sensible defaults
 lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
@@ -691,7 +686,6 @@ while True:
                     "model_args": model_args,
                     "iter_num": iter_num,
                     "best_val_loss": best_val_loss,
-                    "config": config,
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))

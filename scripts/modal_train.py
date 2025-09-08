@@ -13,7 +13,7 @@ image = (
         "tqdm",
         "huggingface-hub",
     )
-    .add_local_dir(".", remote_path="/app")
+    .add_local_file("train_llama.py", remote_path="/train_llama.py")
 )
 
 app = modal.App(name="modded-llama2", image=image)
@@ -41,7 +41,7 @@ def _download_fineweb10b(num_train_shards: int) -> None:
     cpu=32,  # More CPU for 7B model
     memory=256,  # More memory for 7B model
 )
-def run_training(num_train_shards: int = 8, max_iters: int = 5000):
+def run_training(num_train_shards: int = 8):
     """
     Download FineWeb shards, then spawn 8 ranks to run the 6.6B Llama2 training code.
     """
@@ -49,24 +49,11 @@ def run_training(num_train_shards: int = 8, max_iters: int = 5000):
     import sys
     import os
 
-    # Change to the app directory where our files are mounted
-    os.chdir("/app")
-
     # Download data shards
     _download_fineweb10b(int(num_train_shards))
 
-    # Override max_iters for shorter runs during testing by modifying the file
-    with open("train_llama.py", "r") as f:
-        train_script = f.read()
-
-    # Replace the max_iters value
-    train_script = train_script.replace("max_iters = 100", f"max_iters = {max_iters}")
-
-    with open("train_llama.py", "w") as f:
-        f.write(train_script)
-
     # Launch training across 8 GPUs (one process per GPU)
-    result = subprocess.run(["torchrun", "--nproc_per_node=8", "train_llama.py"], capture_output=True, text=True)
+    result = subprocess.run(["torchrun", "--nproc_per_node=8", "/train_llama.py"], capture_output=True, text=True)
 
     print("STDOUT:")
     print(result.stdout)
@@ -79,11 +66,11 @@ def run_training(num_train_shards: int = 8, max_iters: int = 5000):
 
 # Convenience function to run locally
 @app.local_entrypoint()
-def main(num_shards: int = 8, max_iters: int = 1000):
+def main(num_shards: int = 8):
     """
     Run the training with specified parameters
     """
-    result = run_training.remote(num_train_shards=num_shards, max_iters=max_iters)
+    result = run_training.remote(num_train_shards=num_shards)
     print(f"Training completed with return code: {result['returncode']}")
     if result["returncode"] != 0:
         print("STDERR output:")
