@@ -18,6 +18,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 
 import math
 import os
+import sys
 import time
 from contextlib import nullcontext
 import glob
@@ -565,7 +566,14 @@ def get_lr(it):
     return min_lr + coeff * (learning_rate - min_lr)
 
 
-# logging
+# log information about the hardware/software environment this is running on
+if master_process:
+    print(f"Running Python {sys.version}")
+    print(f"Running PyTorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}")
+    def nvidia_smi():
+        import subprocess  # avoid top level import
+        return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
+    print(nvidia_smi())
 
 # training loop
 X, Y = train_loader.next_batch()  # fetch the very first batch
