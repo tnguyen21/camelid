@@ -20,23 +20,17 @@ import math
 import os
 import time
 from contextlib import nullcontext
-from datetime import datetime
-from functools import partial
-
-import torch
-from torch.distributed import destroy_process_group, init_process_group
-from torch.nn.parallel import DistributedDataParallel as DDP
-
 import glob
 import numpy as np
-
 import inspect
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torch import nn
+from torch.distributed import destroy_process_group, init_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def _peek_data_shard(filename):
