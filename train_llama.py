@@ -436,7 +436,7 @@ dropout = 0.0
 # adamw optimizer
 gradient_accumulation_steps = 8  # used to simulate larger batch sizes for 7B
 learning_rate = 3e-4  # max learning rate for large models
-max_iters = 1000  # total number of training iterations
+max_iters = 100  # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
