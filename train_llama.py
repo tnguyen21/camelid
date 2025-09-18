@@ -246,24 +246,13 @@ class Attention(nn.Module):
         xk = xk.transpose(1, 2)
         xv = xv.transpose(1, 2)
 
-        # flash implementation
-        if self.flash:
-            output = torch.nn.functional.scaled_dot_product_attention(
-                xq,
-                xk,
-                xv,
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0.0,
-                is_causal=True,
-            )
-        else:
-            # manual implementation
-            scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
-            assert hasattr(self, "mask")
-            scores = scores + self.mask[:, :, :seqlen, :seqlen]  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            scores = self.attn_dropout(scores)
-            output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
+        # TODO add flash attn
+        scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+        assert hasattr(self, "mask")
+        scores = scores + self.mask[:, :, :seqlen, :seqlen]  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        scores = self.attn_dropout(scores)
+        output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
 
         # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
