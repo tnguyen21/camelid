@@ -33,22 +33,6 @@ from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
-def _peek_data_shard(filename):
-    # only reads the header, returns header data
-    with open(filename, "rb") as f:
-        # first read the header, which is 256 int32 integers (4 bytes each)
-        header = np.frombuffer(f.read(256 * 4), dtype=np.int32)
-    if header[0] != 20240520:
-        print("ERROR: magic number mismatch in the data .bin file!")
-        print("---> HINT: Are you passing in a correct file with --input_bin?")
-        print("---> HINT: Dataset encoding changed recently, re-run data prepro or refer again to README")
-        print("---> HINT: For example re-run: `python dev/data/tinyshakespeare.py`, then re-try")
-        exit(1)
-    assert header[1] == 1, "unsupported version"
-    ntok = header[2]  # number of tokens (claimed)
-    return ntok  # for now just return the number of tokens
-
-
 def _load_data_shard(filename):
     with open(filename, "rb") as f:
         # first read the header, which is 256 int32 integers (4 bytes each)
@@ -71,13 +55,6 @@ class DistributedDataLoader:
         # glob files that match the pattern
         self.files = sorted(glob.glob(filename_pattern))
         assert len(self.files) > 0, f"did not find any files that match the pattern {filename_pattern}"
-        # load and validate all data shards, count number of tokens in total
-        ntok_total = 0
-        for fname in self.files:
-            shard_ntok = _peek_data_shard(fname)
-            assert shard_ntok >= num_processes * B * T + 1
-            ntok_total += int(shard_ntok)
-        self.ntok_total = ntok_total
         # kick things off
         self.reset()
 
