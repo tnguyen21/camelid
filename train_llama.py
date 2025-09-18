@@ -447,8 +447,6 @@ eval_interval = 2000
 log_interval = 1
 eval_iters = 100
 eval_only = False  # if True, script exits right after the first eval
-always_save_checkpoint = False  # if True, always save a checkpoint after each eval
-init_from = "scratch"  # 'scratch' or 'resume'
 # data
 batch_size = 4  # batch size in sequences per device, reduced for safety
 max_seq_len = 1024  # sequence length, reduced to fit memory better
@@ -506,8 +504,6 @@ if master_process:
     print(f"tokens per iteration will be: {tokens_per_iter:,}")
     print(f"breaks down as: {gradient_accumulation_steps=} * {ddp_world_size=} * {batch_size=} * {max_seq_len=}")
 
-if master_process:
-    os.makedirs(out_dir, exist_ok=True)
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
@@ -524,7 +520,7 @@ ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=
 train_loader = DistributedDataLoader(train_data_path, batch_size, max_seq_len, ddp_rank, ddp_world_size)
 val_loader = DistributedDataLoader(val_data_path, batch_size, max_seq_len, ddp_rank, ddp_world_size)
 
-# init these up here, can override if init_from='resume' (i.e. from a checkpoint)
+# init these up here
 iter_num = 0
 best_val_loss = 1e9
 
@@ -539,42 +535,10 @@ model_args = dict(
     max_seq_len=max_seq_len,
     dropout=dropout,
 )  # start with model_args from command line
-if init_from == "scratch":
-    # init a new model from scratch
-    print("Initializing a new model from scratch")
-    gptconf = ModelArgs(**model_args)
-    model = Transformer(gptconf)
-elif init_from == "resume":
-    print(f"Resuming training from {out_dir}")
-    # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, "ckpt.pt")
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    checkpoint_model_args = checkpoint["model_args"]
-    # force these config attributes to be equal otherwise we can't even resume training
-    # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in [
-        "dim",
-        "n_layers",
-        "n_heads",
-        "n_kv_heads",
-        "vocab_size",
-        "multiple_of",
-        "max_seq_len",
-    ]:
-        model_args[k] = checkpoint_model_args[k]
-    # create the model
-    gptconf = ModelArgs(**model_args)
-    model = Transformer(gptconf)
-    state_dict = checkpoint["model"]
-    # fix the keys of the state dictionary :(
-    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-    unwanted_prefix = "_orig_mod."
-    for k, v in list(state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
-    iter_num = checkpoint["iter_num"]
-    best_val_loss = checkpoint["best_val_loss"]
+# init a new model from scratch
+print("Initializing a new model from scratch")
+gptconf = ModelArgs(**model_args)
+model = Transformer(gptconf)
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -582,9 +546,6 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-if init_from == "resume" and "optimizer" in checkpoint:
-    optimizer.load_state_dict(checkpoint["optimizer"])
-checkpoint = None  # free up memory
 
 # compile the model
 if compile:
@@ -648,22 +609,12 @@ while True:
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
-    # evaluate the loss on train/val sets and write checkpoints
+    # evaluate the loss on train/val sets
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        if losses["val"] < best_val_loss or always_save_checkpoint:
+        if losses["val"] < best_val_loss:
             best_val_loss = losses["val"]
-            if iter_num > 0:
-                checkpoint = {
-                    "model": raw_model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "model_args": model_args,
-                    "iter_num": iter_num,
-                    "best_val_loss": best_val_loss,
-                }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
     if iter_num == 0 and eval_only:
         break
 
