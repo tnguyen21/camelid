@@ -570,17 +570,18 @@ def get_lr(it):
 if master_process:
     print(f"Running Python {sys.version}")
     print(f"Running PyTorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}")
+
     def nvidia_smi():
         import subprocess  # avoid top level import
+
         return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
+
     print(nvidia_smi())
 
 # training loop
 X, Y = train_loader.next_batch()  # fetch the very first batch
 t0 = time.time()
-local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module  # unwrap DDP container
-running_mfu = -1.0
 while True:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
@@ -627,14 +628,11 @@ while True:
     dt = t1 - t0
     t0 = t1
     if iter_num % log_interval == 0 and master_process:
-        # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
+        # get loss as float, scale up due to the divide above. note: this is a CPU-GPU  sync point
         lossf = loss.item() * gradient_accumulation_steps
-        if local_iter_num >= 5:  # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
-            running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-        print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms | mfu {running_mfu * 100:.2f}%")
+        mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+        print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms | mfu {mfu * 100:.2f}%")
     iter_num += 1
-    local_iter_num += 1
 
     # termination conditions
     if iter_num > max_iters:
