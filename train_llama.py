@@ -582,7 +582,7 @@ if master_process:
 X, Y = train_loader.next_batch()  # fetch the very first batch
 t0 = time.time()
 raw_model = model.module  # unwrap DDP container
-while True:
+for iter_num in range(iter_num, max_iters + 1):
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
@@ -632,10 +632,5 @@ while True:
         lossf = loss.item() * gradient_accumulation_steps
         mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
         print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms | mfu {mfu * 100:.2f}%")
-    iter_num += 1
-
-    # termination conditions
-    if iter_num > max_iters:
-        break
 
 destroy_process_group()
