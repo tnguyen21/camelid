@@ -9,6 +9,7 @@ import math
 import os
 import sys
 import time
+from datetime import timedelta
 from contextlib import nullcontext
 import glob
 import numpy as np
@@ -20,7 +21,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed import destroy_process_group, init_process_group
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.utils.checkpoint import checkpoint
 
 
 def _load_data_shard(filename):
@@ -212,8 +214,12 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(self, x, freqs_cos, freqs_sin):
-        h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
+        if self.training:
+            h = x + checkpoint(self.attention.forward, self.attention_norm(x), freqs_cos, freqs_sin, use_reentrant=False)
+            out = h + checkpoint(self.feed_forward.forward, self.ffn_norm(h), use_reentrant=False)
+        else:
+            h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
+            out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
 
@@ -340,16 +346,16 @@ class TrainingConfig:
     eval_only: bool = False
 
     # Data
-    batch_size: int = 4
+    batch_size: int = 1
     max_seq_len: int = 1024
     train_data_path: str = "data/fineweb10B/fineweb_train_*.bin"
     val_data_path: str = "data/fineweb10B/fineweb_val_*.bin"
     vocab_source: str = "custom"
     vocab_size: int = 50257
 
-    # Model (~6B configuration)
+    # Model (7B configuration)
     dim: int = 4096
-    n_layers: int = 12
+    n_layers: int = 32
     n_heads: int = 32
     n_kv_heads: int = 32
     multiple_of: int = 256
@@ -382,7 +388,7 @@ class TrainingConfig:
 
 
 def setup_distributed(config):
-    init_process_group(backend="nccl")
+    init_process_group(backend="nccl", timeout=timedelta(seconds=30))
     ddp_rank = int(os.environ["RANK"])
     ddp_local_rank = int(os.environ["LOCAL_RANK"])
     ddp_world_size = int(os.environ["WORLD_SIZE"])
@@ -434,14 +440,20 @@ model.to(device)
 scaler = torch.amp.GradScaler(enabled=(config.dtype == "float16"))
 optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
 
+# FSDP setup - modern approach with mixed precision
+fsdp_kwargs = {
+    "mp_policy": MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.float32,
+    )
+}
+for layer in model.layers:
+    fully_shard(layer, **fsdp_kwargs)
+fully_shard(model, **fsdp_kwargs)
+
 if config.compile:
     print("compiling the model... (takes a ~minute)")
-    unoptimized_model = model
     model = torch.compile(model)
-
-prefix = "_orig_mod." if config.compile else ""
-model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
-model = DDP(model, device_ids=[ddp_local_rank])
 
 
 @torch.no_grad()
@@ -455,7 +467,7 @@ def estimate_loss():
             X, Y = loader.next_batch()
             with ctx:
                 _ = model(X, Y)
-                loss = raw_model.last_loss
+                loss = model.last_loss
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -485,17 +497,18 @@ if master_process:
 # training loop
 X, Y = train_loader.next_batch()
 t0 = time.time()
-raw_model = model.module
+raw_model = model
 for iter_num in range(iter_num, config.max_iters + 1):
     lr = get_lr(iter_num) if config.decay_lr else config.learning_rate
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
-    if iter_num % config.eval_interval == 0 and master_process:
+    if iter_num % config.eval_interval == 0:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        if losses["val"] < best_val_loss:
-            best_val_loss = losses["val"]
+        if master_process:
+            print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            if losses["val"] < best_val_loss:
+                best_val_loss = losses["val"]
     if iter_num == 0 and config.eval_only:
         break
 
@@ -503,7 +516,7 @@ for iter_num in range(iter_num, config.max_iters + 1):
         model.require_backward_grad_sync = micro_step == config.gradient_accumulation_steps - 1
         with ctx:
             logits = model(X, Y)
-            loss = raw_model.last_loss
+            loss = model.last_loss
             loss = loss / config.gradient_accumulation_steps
         X, Y = train_loader.next_batch()
         scaler.scale(loss).backward()
@@ -514,13 +527,12 @@ for iter_num in range(iter_num, config.max_iters + 1):
     scaler.step(optimizer)
     scaler.update()
     optimizer.zero_grad(set_to_none=True)
-
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
     if iter_num % config.log_interval == 0 and master_process:
         lossf = loss.item() * config.gradient_accumulation_steps
-        mfu = raw_model.estimate_mfu(config.batch_size * config.gradient_accumulation_steps, dt)
+        mfu = model.estimate_mfu(config.batch_size * config.gradient_accumulation_steps, dt)
         print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms | mfu {mfu * 100:.2f}%")
 
 destroy_process_group()
