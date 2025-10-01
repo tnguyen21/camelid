@@ -46,8 +46,6 @@ def run_training(num_train_shards: int = 8):
     Download FineWeb shards, then spawn 8 ranks to run the 6.6B Llama2 training code.
     """
     import subprocess
-    import sys
-    import os
 
     # Download data shards
     _download_fineweb10b(int(num_train_shards))
