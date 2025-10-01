@@ -51,7 +51,7 @@ def run_training(num_train_shards: int = 8):
     _download_fineweb10b(int(num_train_shards))
 
     # Launch training across 8 GPUs (one process per GPU)
-    result = subprocess.run(["torchrun", "--nproc_per_node=8", "/train_llama.py"], capture_output=True, text=True)
+    result = subprocess.run(["torchrun", "--nproc_per_node=8", "/train_llama.py", "--mixed-precision"], capture_output=True, text=True)
 
     print("STDOUT:")
     print(result.stdout)

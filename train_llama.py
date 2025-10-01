@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed import destroy_process_group, init_process_group
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, FSDPModule
 from torch.utils.checkpoint import checkpoint
 
 
@@ -58,7 +58,7 @@ class DistributedDataLoader:
         self.current_position += self.B * self.T * self.num_processes
         if self.current_position + (self.B * self.T * self.num_processes + 1) > len(self.tokens):
             self._load_shard((self.current_shard + 1) % len(self.files))
-        return x.cuda(), y.cuda()
+        return x.to(torch.cuda.current_device()), y.to(torch.cuda.current_device())
 
 
 @dataclass
@@ -362,7 +362,7 @@ class TrainingConfig:
     dropout: float = 0.0
 
     # Optimizer
-    gradient_accumulation_steps: int = 8
+    gradient_accumulation_steps: int = 32
     learning_rate: float = 3e-4
     max_iters: int = 100
     weight_decay: float = 1e-1
@@ -371,7 +371,7 @@ class TrainingConfig:
     grad_clip: float = 1.0
 
     # Learning rate schedule
-    decay_lr: bool = True
+    decay_lr: bool = False
 
     # System
     device: str = "cuda"
@@ -396,7 +396,7 @@ def setup_distributed(config):
     torch.cuda.set_device(device)
     master_process = ddp_rank == 0
 
-    assert config.gradient_accumulation_steps % ddp_world_size == 0
+    # assert config.gradient_accumulation_steps % ddp_world_size == 0
     config.gradient_accumulation_steps //= ddp_world_size
     tokens_per_iter = config.gradient_accumulation_steps * ddp_world_size * config.batch_size * config.max_seq_len
 
@@ -437,9 +437,6 @@ model_args = ModelArgs(
 model = Transformer(model_args)
 model.to(device)
 
-scaler = torch.amp.GradScaler(enabled=(config.dtype == "float16"))
-optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
-
 # FSDP setup - modern approach with mixed precision
 fsdp_kwargs = {
     "mp_policy": MixedPrecisionPolicy(
@@ -450,6 +447,11 @@ fsdp_kwargs = {
 for layer in model.layers:
     fully_shard(layer, **fsdp_kwargs)
 fully_shard(model, **fsdp_kwargs)
+
+assert isinstance(model, FSDPModule)
+
+# Create optimizer AFTER FSDP sharding so it sees DTensors
+optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
 
 if config.compile:
     print("compiling the model... (takes a ~minute)")
@@ -465,9 +467,8 @@ def estimate_loss():
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
             X, Y = loader.next_batch()
-            with ctx:
-                _ = model(X, Y)
-                loss = model.last_loss
+            _ = model(X, Y)
+            loss = model.last_loss
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -498,6 +499,7 @@ if master_process:
 X, Y = train_loader.next_batch()
 t0 = time.time()
 raw_model = model
+
 for iter_num in range(iter_num, config.max_iters + 1):
     lr = get_lr(iter_num) if config.decay_lr else config.learning_rate
     for param_group in optimizer.param_groups:
@@ -513,20 +515,21 @@ for iter_num in range(iter_num, config.max_iters + 1):
         break
 
     for micro_step in range(config.gradient_accumulation_steps):
-        model.require_backward_grad_sync = micro_step == config.gradient_accumulation_steps - 1
-        with ctx:
-            logits = model(X, Y)
-            loss = model.last_loss
-            loss = loss / config.gradient_accumulation_steps
-        X, Y = train_loader.next_batch()
-        scaler.scale(loss).backward()
+        is_last_micro = micro_step == config.gradient_accumulation_steps - 1
 
-    if config.grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-    scaler.step(optimizer)
-    scaler.update()
-    optimizer.zero_grad(set_to_none=True)
+        model.set_requires_gradient_sync(is_last_micro, recurse=True)
+        model.set_reshard_after_backward(is_last_micro, recurse=True)
+
+        logits = model(X, Y)
+        loss = model.last_loss / config.gradient_accumulation_steps
+        X, Y = train_loader.next_batch()
+        loss.backward()
+
+        if is_last_micro:
+            if config.grad_clip != 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
