@@ -10,7 +10,6 @@ import os
 import sys
 import time
 from datetime import timedelta
-from contextlib import nullcontext
 import glob
 import numpy as np
 import inspect
@@ -285,7 +284,7 @@ class Transformer(nn.Module):
         all_params = [p for p in self.parameters() if p.requires_grad]
 
         fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == "cuda"
+        use_fused = fused_available
         extra_args = dict(fused=True) if use_fused else dict()
 
         optimizer = torch.optim.AdamW(
@@ -389,6 +388,10 @@ class TrainingConfig:
 
 
 def setup_distributed(config):
+    # Assert we have multiple GPUs available
+    assert torch.cuda.is_available(), "CUDA must be available for distributed training"
+    assert torch.cuda.device_count() > 1, "Multiple GPUs required for distributed training"
+
     init_process_group(backend="nccl", timeout=timedelta(seconds=30))
     ddp_rank = int(os.environ["RANK"])
     ddp_local_rank = int(os.environ["LOCAL_RANK"])
@@ -409,9 +412,9 @@ def setup_distributed(config):
     torch.backends.cuda.matmul.fp32_precision = "tf32"
     torch.backends.cudnn.fp32_precision = "tf32"
 
-    device_type = "cuda" if "cuda" in device else "cpu"
+    device_type = "cuda"
     ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[config.dtype]
-    ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+    ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
     return ddp_rank, ddp_local_rank, ddp_world_size, device, master_process, device_type, ctx
 
