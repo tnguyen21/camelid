@@ -312,7 +312,7 @@ class Transformer(nn.Module):
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         flops_achieved = flops_per_iter * (1.0 / dt)
-        flops_promised = 1979e12  # H100 GPU bfloat16 peak flops
+        flops_promised = 204e12  # H100 GPU bfloat16 peak flops
         return flops_achieved / flops_promised
 
     @torch.inference_mode()
@@ -346,7 +346,7 @@ class TrainingConfig:
     eval_only: bool = False
 
     # Data
-    batch_size: int = 1
+    batch_size: int = 4
     max_seq_len: int = 1024
     train_data_path: str = "data/fineweb10B/fineweb_train_*.bin"
     val_data_path: str = "data/fineweb10B/fineweb_val_*.bin"
@@ -362,7 +362,7 @@ class TrainingConfig:
     dropout: float = 0.0
 
     # Optimizer
-    gradient_accumulation_steps: int = 8
+    gradient_accumulation_steps: int = 4
     learning_rate: float = 1e-3
     max_iters: int = 100
     weight_decay: float = 0.0
@@ -377,7 +377,7 @@ class TrainingConfig:
     # System
     device: str = "cuda"
     dtype: str = "bfloat16"
-    compile: bool = False
+    compile: bool = True
 
     def __post_init__(self):
         self.lr_decay_iters = self.max_iters
@@ -503,8 +503,8 @@ X, Y = train_loader.next_batch()
 t0 = time.time()
 raw_model = model
 
-for iter_num in range(iter_num, config.max_iters + 1):
-    lr = get_lr(iter_num) if config.decay_lr else config.learning_rate
+for iter_num in range(iter_num, config.max_iters):
+    lr = get_lr(iter_num) * config.learning_rate if config.decay_lr else config.learning_rate
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
@@ -529,8 +529,6 @@ for iter_num in range(iter_num, config.max_iters + 1):
         loss.backward()
 
         if is_last_micro:
-            if config.grad_clip != 0.0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
     t1 = time.time()
