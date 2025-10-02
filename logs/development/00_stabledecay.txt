@@ -1,0 +1,158 @@
+✓ Initialized. View run at https://modal.com/apps/tommynguyen0512/main/ap-RRh5GmeWd3YcxaVmAQFolP
+✓ Created objects.
+├── 🔨 Created mount train_llama.py
+├── 🔨 Created mount /home/tau/projects/camelid/scripts/modal_train.py
+└── 🔨 Created function run_training.
+STDOUT:
+tokens per iteration: 32,768
+breakdown: config.gradient_accumulation_steps=2 * ddp_world_size=4 * config.batch_size=4 * config.max_seq_len=1024
+total params: 110 tensors, 123,551,232 parameters
+weight_decay: 0.0, betas: (0.8, 0.95), eps: 1e-10
+using fused AdamW: True
+Python 3.11.10 (main, Dec  3 2024, 02:25:00) [GCC 12.2.0]
+PyTorch 2.9.0.dev20250908+cu126 (CUDA 12.6)
+Thu Oct  2 18:52:36 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 575.57.08              Driver Version: 575.57.08      CUDA Version: 12.9     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L4                      On  |   00000000:00:06.0 Off |                    0 |
+| N/A   59C    P0             30W /   72W |    1861MiB /  23034MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA L4                      On  |   00000000:00:07.0 Off |                    0 |
+| N/A   61C    P0             32W /   72W |    1861MiB /  23034MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA L4                      On  |   00000000:80:00.0 Off |                    0 |
+| N/A   58C    P0             32W /   72W |    1861MiB /  23034MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA L4                      On  |   00000000:80:01.0 Off |                    0 |
+| N/A   68C    P0             34W /   72W |    1861MiB /  23034MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A               1      C   /bin/dumb-init                         1852MiB |
+|    1   N/A  N/A               1      C   /bin/dumb-init                         1852MiB |
+|    2   N/A  N/A               1      C   /bin/dumb-init                         1852MiB |
+|    3   N/A  N/A               1      C   /bin/dumb-init                         1852MiB |
++-----------------------------------------------------------------------------------------+
+
+step 0: train loss 10.9814, val loss 10.9729
+0 | loss 10.9655 | lr 1.000000e-03 | 27268.42ms | mfu 0.01%
+1 | loss 10.3139 | lr 1.000000e-03 | 617.97ms | mfu 0.57%
+2 | loss 9.3678 | lr 1.000000e-03 | 800.97ms | mfu 0.44%
+3 | loss 8.8491 | lr 1.000000e-03 | 827.07ms | mfu 0.43%
+4 | loss 8.3303 | lr 1.000000e-03 | 830.52ms | mfu 0.43%
+5 | loss 8.0247 | lr 1.000000e-03 | 825.63ms | mfu 0.43%
+6 | loss 7.9715 | lr 1.000000e-03 | 822.96ms | mfu 0.43%
+7 | loss 8.1149 | lr 1.000000e-03 | 828.34ms | mfu 0.43%
+8 | loss 7.7023 | lr 1.000000e-03 | 829.65ms | mfu 0.43%
+9 | loss 7.6510 | lr 1.000000e-03 | 828.74ms | mfu 0.43%
+10 | loss 7.6853 | lr 1.000000e-03 | 827.72ms | mfu 0.43%
+11 | loss 8.1317 | lr 1.000000e-03 | 824.39ms | mfu 0.43%
+12 | loss 7.8555 | lr 1.000000e-03 | 831.40ms | mfu 0.43%
+13 | loss 7.8387 | lr 1.000000e-03 | 828.66ms | mfu 0.43%
+14 | loss 7.9116 | lr 1.000000e-03 | 831.27ms | mfu 0.43%
+15 | loss 7.7519 | lr 1.000000e-03 | 830.49ms | mfu 0.43%
+16 | loss 7.8797 | lr 1.000000e-03 | 830.78ms | mfu 0.43%
+17 | loss 7.6250 | lr 1.000000e-03 | 828.62ms | mfu 0.43%
+18 | loss 7.8254 | lr 1.000000e-03 | 831.84ms | mfu 0.43%
+19 | loss 7.4436 | lr 1.000000e-03 | 829.40ms | mfu 0.43%
+20 | loss 7.6022 | lr 1.000000e-03 | 833.96ms | mfu 0.42%
+21 | loss 8.2624 | lr 1.000000e-03 | 832.60ms | mfu 0.42%
+22 | loss 7.7112 | lr 1.000000e-03 | 828.39ms | mfu 0.43%
+23 | loss 7.6425 | lr 1.000000e-03 | 834.23ms | mfu 0.42%
+24 | loss 7.4087 | lr 1.000000e-03 | 834.68ms | mfu 0.42%
+25 | loss 7.8098 | lr 1.000000e-03 | 847.08ms | mfu 0.42%
+26 | loss 7.5985 | lr 1.000000e-03 | 823.83ms | mfu 0.43%
+27 | loss 7.4383 | lr 1.000000e-03 | 836.30ms | mfu 0.42%
+28 | loss 7.7420 | lr 1.000000e-03 | 838.41ms | mfu 0.42%
+29 | loss 7.2515 | lr 1.000000e-03 | 831.97ms | mfu 0.43%
+30 | loss 7.2028 | lr 1.000000e-03 | 833.33ms | mfu 0.42%
+31 | loss 7.3964 | lr 1.000000e-03 | 832.64ms | mfu 0.42%
+32 | loss 7.1254 | lr 1.000000e-03 | 846.56ms | mfu 0.42%
+33 | loss 8.2637 | lr 1.000000e-03 | 824.22ms | mfu 0.43%
+34 | loss 7.3218 | lr 1.000000e-03 | 835.57ms | mfu 0.42%
+35 | loss 7.4471 | lr 1.000000e-03 | 832.34ms | mfu 0.42%
+36 | loss 7.3293 | lr 1.000000e-03 | 834.19ms | mfu 0.42%
+37 | loss 7.4931 | lr 1.000000e-03 | 832.88ms | mfu 0.42%
+38 | loss 7.0793 | lr 1.000000e-03 | 836.46ms | mfu 0.42%
+39 | loss 7.6090 | lr 1.000000e-03 | 834.03ms | mfu 0.42%
+40 | loss 6.9046 | lr 1.000000e-03 | 834.02ms | mfu 0.42%
+41 | loss 7.1123 | lr 1.000000e-03 | 826.88ms | mfu 0.43%
+42 | loss 7.0102 | lr 1.000000e-03 | 837.95ms | mfu 0.42%
+43 | loss 7.2559 | lr 1.000000e-03 | 827.53ms | mfu 0.43%
+44 | loss 7.3329 | lr 1.000000e-03 | 836.93ms | mfu 0.42%
+45 | loss 7.5496 | lr 1.000000e-03 | 834.37ms | mfu 0.42%
+46 | loss 7.1073 | lr 1.000000e-03 | 834.73ms | mfu 0.42%
+47 | loss 7.5819 | lr 1.000000e-03 | 807.24ms | mfu 0.44%
+48 | loss 6.9268 | lr 1.000000e-03 | 834.40ms | mfu 0.42%
+49 | loss 6.8991 | lr 1.000000e-03 | 825.54ms | mfu 0.43%
+50 | loss 7.3973 | lr 1.000000e-03 | 833.03ms | mfu 0.42%
+51 | loss 6.6454 | lr 1.000000e-03 | 808.68ms | mfu 0.44%
+52 | loss 7.5308 | lr 1.000000e-03 | 828.78ms | mfu 0.43%
+53 | loss 7.3951 | lr 1.000000e-03 | 806.37ms | mfu 0.44%
+54 | loss 7.1689 | lr 1.000000e-03 | 834.04ms | mfu 0.42%
+55 | loss 7.1308 | lr 1.000000e-03 | 825.48ms | mfu 0.43%
+56 | loss 7.0642 | lr 9.800000e-04 | 833.11ms | mfu 0.42%
+57 | loss 7.1270 | lr 9.600000e-04 | 830.54ms | mfu 0.43%
+58 | loss 6.8580 | lr 9.400000e-04 | 833.48ms | mfu 0.42%
+59 | loss 6.7980 | lr 9.200000e-04 | 823.58ms | mfu 0.43%
+60 | loss 6.8768 | lr 9.000000e-04 | 834.05ms | mfu 0.42%
+61 | loss 7.0739 | lr 8.800000e-04 | 804.46ms | mfu 0.44%
+62 | loss 7.5117 | lr 8.600000e-04 | 834.30ms | mfu 0.42%
+63 | loss 6.6286 | lr 8.400000e-04 | 828.57ms | mfu 0.43%
+64 | loss 6.7259 | lr 8.200000e-04 | 836.59ms | mfu 0.42%
+65 | loss 6.7196 | lr 8.000000e-04 | 803.55ms | mfu 0.44%
+66 | loss 6.8503 | lr 7.800000e-04 | 839.47ms | mfu 0.42%
+67 | loss 6.2730 | lr 7.600000e-04 | 804.09ms | mfu 0.44%
+68 | loss 6.9377 | lr 7.400000e-04 | 838.88ms | mfu 0.42%
+69 | loss 6.9465 | lr 7.200000e-04 | 803.11ms | mfu 0.44%
+70 | loss 6.9753 | lr 7.000000e-04 | 837.16ms | mfu 0.42%
+71 | loss 6.9094 | lr 6.800000e-04 | 822.70ms | mfu 0.43%
+72 | loss 6.4254 | lr 6.600000e-04 | 830.85ms | mfu 0.43%
+73 | loss 6.8888 | lr 6.400000e-04 | 828.39ms | mfu 0.43%
+74 | loss 7.1077 | lr 6.200000e-04 | 830.88ms | mfu 0.43%
+75 | loss 6.8668 | lr 6.000000e-04 | 825.38ms | mfu 0.43%
+76 | loss 6.7475 | lr 5.800000e-04 | 831.90ms | mfu 0.43%
+77 | loss 6.5479 | lr 5.600000e-04 | 829.08ms | mfu 0.43%
+78 | loss 6.8549 | lr 5.400000e-04 | 833.98ms | mfu 0.42%
+Training completed with return code: 0
+Stopping app - local entrypoint completed.
+79 | loss 6.9661 | lr 5.200000e-04 | 827.87ms | mfu 0.43%
+80 | loss 6.8120 | lr 5.000000e-04 | 832.38ms | mfu 0.42%
+81 | loss 6.7276 | lr 4.800000e-04 | 825.26ms | mfu 0.43%
+82 | loss 6.9486 | lr 4.600000e-04 | 833.77ms | mfu 0.42%
+83 | loss 6.5456 | lr 4.400000e-04 | 829.76ms | mfu 0.43%
+84 | loss 6.9526 | lr 4.200000e-04 | 828.81ms | mfu 0.43%
+85 | loss 6.6633 | lr 4.000000e-04 | 823.67ms | mfu 0.43%
+86 | loss 6.3742 | lr 3.800000e-04 | 837.55ms | mfu 0.42%
+87 | loss 7.2729 | lr 3.600000e-04 | 827.79ms | mfu 0.43%
+88 | loss 6.4785 | lr 3.400000e-04 | 826.61ms | mfu 0.43%
+89 | loss 6.7767 | lr 3.200000e-04 | 827.57ms | mfu 0.43%
+90 | loss 6.9283 | lr 3.000000e-04 | 833.85ms | mfu 0.42%
+91 | loss 7.1411 | lr 2.800000e-04 | 822.08ms | mfu 0.43%
+92 | loss 7.5797 | lr 2.600000e-04 | 833.49ms | mfu 0.42%
+93 | loss 6.6321 | lr 2.400000e-04 | 824.14ms | mfu 0.43%
+94 | loss 6.6599 | lr 2.200000e-04 | 836.04ms | mfu 0.42%
+95 | loss 7.6402 | lr 2.000000e-04 | 803.61ms | mfu 0.44%
+96 | loss 6.3585 | lr 1.800000e-04 | 836.71ms | mfu 0.42%
+97 | loss 6.4755 | lr 1.600000e-04 | 803.11ms | mfu 0.44%
+98 | loss 6.7812 | lr 1.400000e-04 | 838.04ms | mfu 0.42%
+99 | loss 7.0637 | lr 1.200000e-04 | 807.15ms | mfu 0.44%
+100 | loss 6.3504 | lr 1.000000e-04 | 832.16ms | mfu 0.43%
+
+STDERR:
+
+Return code: 0
+✓ App completed. View run at https://modal.com/apps/tommynguyen0512/main/ap-RRh5GmeWd3YcxaVmAQFolP
