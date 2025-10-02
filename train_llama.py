@@ -282,24 +282,25 @@ class Transformer(nn.Module):
         return logits
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {"params": decay_params, "weight_decay": weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ]
+        all_params = [p for p in self.parameters() if p.requires_grad]
 
         fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == "cuda"
         extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+
+        optimizer = torch.optim.AdamW(
+            all_params,
+            lr=learning_rate,
+            betas=betas,
+            eps=1e-10,  # Smaller epsilon for distributed training stability
+            weight_decay=weight_decay,
+            **extra_args,
+        )
 
         if master_process:
-            num_decay_params = sum(p.numel() for p in decay_params)
-            num_nodecay_params = sum(p.numel() for p in nodecay_params)
-            print(f"decayed params: {len(decay_params)} tensors, {num_decay_params:,} parameters")
-            print(f"non-decayed params: {len(nodecay_params)} tensors, {num_nodecay_params:,} parameters")
+            num_params = sum(p.numel() for p in all_params)
+            print(f"total params: {len(all_params)} tensors, {num_params:,} parameters")
+            print(f"{learning_rate=}, {weight_decay=}, {betas=}, eps: 1e-10")
             print(f"using fused AdamW: {use_fused}")
 
         return optimizer
@@ -362,16 +363,17 @@ class TrainingConfig:
     dropout: float = 0.0
 
     # Optimizer
-    gradient_accumulation_steps: int = 32
-    learning_rate: float = 3e-4
+    gradient_accumulation_steps: int = 8
+    learning_rate: float = 1e-3
     max_iters: int = 100
-    weight_decay: float = 1e-1
-    beta1: float = 0.9
+    weight_decay: float = 0.0
+    beta1: float = 0.8
     beta2: float = 0.95
-    grad_clip: float = 1.0
 
     # Learning rate schedule
-    decay_lr: bool = False
+    decay_lr: bool = True
+    cooldown_frac: float = 0.45
+    min_lr_frac: float = 0.1
 
     # System
     device: str = "cuda"
@@ -379,9 +381,8 @@ class TrainingConfig:
     compile: bool = False
 
     def __post_init__(self):
-        self.warmup_iters = min(1000, self.max_iters // 10)
         self.lr_decay_iters = self.max_iters
-        self.min_lr = 0.0
+        self.min_lr = self.learning_rate * self.min_lr_frac
 
         assert self.vocab_source in ["llama2", "custom"]
         assert self.vocab_source == "custom" or self.vocab_size == 32000
@@ -475,15 +476,14 @@ def estimate_loss():
     return out
 
 
-def get_lr(it):
-    if it < config.warmup_iters:
-        return config.learning_rate * it / config.warmup_iters
-    if it > config.lr_decay_iters:
-        return config.min_lr
-    decay_ratio = (it - config.warmup_iters) / (config.lr_decay_iters - config.warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return config.min_lr + coeff * (config.learning_rate - config.min_lr)
+def get_lr(step: int):
+    x = step / config.max_iters
+    assert 0 <= x < 1
+    if x < 1 - config.cooldown_frac:
+        return 1.0
+    else:
+        w = (1 - x) / config.cooldown_frac
+        return w * 1.0 + (1 - w) * 0.1
 
 
 if master_process:
