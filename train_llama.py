@@ -447,7 +447,8 @@ assert isinstance(model, FSDPModule)
 optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
 
 if config.compile:
-    print("compiling the model... (takes a ~minute)")
+    if master_process:
+        print("compiling the model... (takes a ~minute)")
     model = torch.compile(model)
 
 
