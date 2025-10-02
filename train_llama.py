@@ -363,7 +363,6 @@ class TrainingConfig:
     weight_decay: float = 0.0
     beta1: float = 0.8
     beta2: float = 0.95
-    grad_clip: float = 1.0
 
     # Learning rate schedule
     decay_lr: bool = True
@@ -509,9 +508,6 @@ for iter_num in range(iter_num, config.max_iters):
         X, Y = train_loader.next_batch()
         scaler.scale(loss).backward()
 
-    if config.grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
     scaler.step(optimizer)
     scaler.update()
     optimizer.zero_grad(set_to_none=True)
