@@ -304,17 +304,6 @@ class Transformer(nn.Module):
 
         return optimizer
 
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        N = sum(p.numel() for p in self.parameters())
-        cfg = self.params
-        L, H, Q, T = cfg.n_layers, cfg.n_heads, cfg.dim // cfg.n_heads, cfg.max_seq_len
-        flops_per_token = 6 * N + 12 * L * H * Q * T
-        flops_per_fwdbwd = flops_per_token * T
-        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        flops_achieved = flops_per_iter * (1.0 / dt)
-        flops_promised = 204e12  # H100 GPU bfloat16 peak flops
-        return flops_achieved / flops_promised
-
     @torch.inference_mode()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         for _ in range(max_new_tokens):
@@ -536,7 +525,6 @@ for iter_num in range(iter_num, config.max_iters):
     t0 = t1
     if iter_num % config.log_interval == 0 and master_process:
         lossf = loss.item() * config.gradient_accumulation_steps
-        mfu = model.estimate_mfu(config.batch_size * config.gradient_accumulation_steps, dt)
-        print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms | mfu {mfu * 100:.2f}%")
+        print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms")
 
 destroy_process_group()
