@@ -9,7 +9,7 @@ import math
 import os
 import sys
 import time
-from contextlib import nullcontext
+from datetime import timedelta
 import glob
 import numpy as np
 import inspect
@@ -20,7 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed import destroy_process_group, init_process_group
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, FSDPModule
+from torch.utils.checkpoint import checkpoint
 
 
 def _load_data_shard(filename):
@@ -56,7 +57,7 @@ class DistributedDataLoader:
         self.current_position += self.B * self.T * self.num_processes
         if self.current_position + (self.B * self.T * self.num_processes + 1) > len(self.tokens):
             self._load_shard((self.current_shard + 1) % len(self.files))
-        return x.cuda(), y.cuda()
+        return x.to(torch.cuda.current_device()), y.to(torch.cuda.current_device())
 
 
 @dataclass
@@ -212,8 +213,12 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(self, x, freqs_cos, freqs_sin):
-        h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
+        if self.training:
+            h = x + checkpoint(self.attention.forward, self.attention_norm(x), freqs_cos, freqs_sin, use_reentrant=False)
+            out = h + checkpoint(self.feed_forward.forward, self.ffn_norm(h), use_reentrant=False)
+        else:
+            h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
+            out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
 
@@ -279,7 +284,7 @@ class Transformer(nn.Module):
         all_params = [p for p in self.parameters() if p.requires_grad]
 
         fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == "cuda"
+        use_fused = fused_available
         extra_args = dict(fused=True) if use_fused else dict()
 
         optimizer = torch.optim.AdamW(
@@ -298,17 +303,6 @@ class Transformer(nn.Module):
             print(f"using fused AdamW: {use_fused}")
 
         return optimizer
-
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        N = sum(p.numel() for p in self.parameters())
-        cfg = self.params
-        L, H, Q, T = cfg.n_layers, cfg.n_heads, cfg.dim // cfg.n_heads, cfg.max_seq_len
-        flops_per_token = 6 * N + 12 * L * H * Q * T
-        flops_per_fwdbwd = flops_per_token * T
-        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        flops_achieved = flops_per_iter * (1.0 / dt)
-        flops_promised = 1979e12  # H100 GPU bfloat16 peak flops
-        return flops_achieved / flops_promised
 
     @torch.inference_mode()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
@@ -348,16 +342,16 @@ class TrainingConfig:
     vocab_source: str = "custom"
     vocab_size: int = 50257
 
-    # Model (~6B configuration)
-    dim: int = 768
-    n_layers: int = 12
-    n_heads: int = 12
-    n_kv_heads: int = 12
+    # Model (7B configuration)
+    dim: int = 4096
+    n_layers: int = 32
+    n_heads: int = 32
+    n_kv_heads: int = 32
     multiple_of: int = 256
     dropout: float = 0.0
 
     # Optimizer
-    gradient_accumulation_steps: int = 8
+    gradient_accumulation_steps: int = 4
     learning_rate: float = 1e-3
     max_iters: int = 100
     weight_decay: float = 0.0
@@ -372,7 +366,7 @@ class TrainingConfig:
     # System
     device: str = "cuda"
     dtype: str = "bfloat16"
-    compile: bool = False
+    compile: bool = True
 
     def __post_init__(self):
         self.lr_decay_iters = self.max_iters
@@ -383,7 +377,11 @@ class TrainingConfig:
 
 
 def setup_distributed(config):
-    init_process_group(backend="nccl")
+    # Assert we have multiple GPUs available
+    assert torch.cuda.is_available(), "CUDA must be available for distributed training"
+    assert torch.cuda.device_count() > 1, "Multiple GPUs required for distributed training"
+
+    init_process_group(backend="nccl", timeout=timedelta(seconds=30))
     ddp_rank = int(os.environ["RANK"])
     ddp_local_rank = int(os.environ["LOCAL_RANK"])
     ddp_world_size = int(os.environ["WORLD_SIZE"])
@@ -391,7 +389,7 @@ def setup_distributed(config):
     torch.cuda.set_device(device)
     master_process = ddp_rank == 0
 
-    assert config.gradient_accumulation_steps % ddp_world_size == 0
+    # assert config.gradient_accumulation_steps % ddp_world_size == 0
     config.gradient_accumulation_steps //= ddp_world_size
     tokens_per_iter = config.gradient_accumulation_steps * ddp_world_size * config.batch_size * config.max_seq_len
 
@@ -403,9 +401,9 @@ def setup_distributed(config):
     torch.backends.cuda.matmul.fp32_precision = "tf32"
     torch.backends.cudnn.fp32_precision = "tf32"
 
-    device_type = "cuda" if "cuda" in device else "cpu"
+    device_type = "cuda"
     ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[config.dtype]
-    ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+    ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
     return ddp_rank, ddp_local_rank, ddp_world_size, device, master_process, device_type, ctx
 
@@ -432,17 +430,26 @@ model_args = ModelArgs(
 model = Transformer(model_args)
 model.to(device)
 
-scaler = torch.amp.GradScaler(enabled=(config.dtype == "float16"))
+# FSDP setup - modern approach with mixed precision
+fsdp_kwargs = {
+    "mp_policy": MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.float32,
+    )
+}
+for layer in model.layers:
+    fully_shard(layer, **fsdp_kwargs)
+fully_shard(model, **fsdp_kwargs)
+
+assert isinstance(model, FSDPModule)
+
+# Create optimizer AFTER FSDP sharding so it sees DTensors
 optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
 
 if config.compile:
-    print("compiling the model... (takes a ~minute)")
-    unoptimized_model = model
+    if master_process:
+        print("compiling the model... (takes a ~minute)")
     model = torch.compile(model)
-
-prefix = "_orig_mod." if config.compile else ""
-model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
-model = DDP(model, device_ids=[ddp_local_rank])
 
 
 @torch.no_grad()
@@ -454,9 +461,8 @@ def estimate_loss():
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
             X, Y = loader.next_batch()
-            with ctx:
-                _ = model(X, Y)
-                loss = raw_model.last_loss
+            _ = model(X, Y)
+            loss = model.last_loss
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -485,39 +491,41 @@ if master_process:
 # training loop
 X, Y = train_loader.next_batch()
 t0 = time.time()
-raw_model = model.module
+raw_model = model
+
 for iter_num in range(iter_num, config.max_iters):
     lr = get_lr(iter_num) * config.learning_rate if config.decay_lr else config.learning_rate
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
-    if iter_num % config.eval_interval == 0 and master_process:
+    if iter_num % config.eval_interval == 0:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        if losses["val"] < best_val_loss:
-            best_val_loss = losses["val"]
+        if master_process:
+            print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            if losses["val"] < best_val_loss:
+                best_val_loss = losses["val"]
     if iter_num == 0 and config.eval_only:
         break
 
     for micro_step in range(config.gradient_accumulation_steps):
-        model.require_backward_grad_sync = micro_step == config.gradient_accumulation_steps - 1
-        with ctx:
-            logits = model(X, Y)
-            loss = raw_model.last_loss
-            loss = loss / config.gradient_accumulation_steps
+        is_last_micro = micro_step == config.gradient_accumulation_steps - 1
+
+        model.set_requires_gradient_sync(is_last_micro, recurse=True)
+        model.set_reshard_after_backward(is_last_micro, recurse=True)
+
+        logits = model(X, Y)
+        loss = model.last_loss / config.gradient_accumulation_steps
         X, Y = train_loader.next_batch()
-        scaler.scale(loss).backward()
+        loss.backward()
 
-    scaler.step(optimizer)
-    scaler.update()
-    optimizer.zero_grad(set_to_none=True)
-
+        if is_last_micro:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
     if iter_num % config.log_interval == 0 and master_process:
         lossf = loss.item() * config.gradient_accumulation_steps
-        mfu = raw_model.estimate_mfu(config.batch_size * config.gradient_accumulation_steps, dt)
-        print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms | mfu {mfu * 100:.2f}%")
+        print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms")
 
 destroy_process_group()
