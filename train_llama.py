@@ -280,7 +280,7 @@ class Transformer(nn.Module):
 
         return logits
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def configure_optimizers(self, weight_decay, learning_rate, betas):
         # Separate parameters similar to train_modded_gpt.py
         # Muon for 2D weight matrices in transformer blocks (excluding embeddings)
         hidden_matrix_params = []
@@ -430,15 +430,11 @@ def setup_distributed(config):
     torch.backends.cuda.matmul.fp32_precision = "tf32"
     torch.backends.cudnn.fp32_precision = "tf32"
 
-    device_type = "cuda"
-    ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[config.dtype]
-    ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-
-    return ddp_rank, ddp_local_rank, ddp_world_size, device, master_process, device_type, ctx
+    return ddp_rank, ddp_local_rank, ddp_world_size, device, master_process
 
 
 config = TrainingConfig()
-ddp_rank, ddp_local_rank, ddp_world_size, device, master_process, device_type, ctx = setup_distributed(config)
+ddp_rank, ddp_local_rank, ddp_world_size, device, master_process = setup_distributed(config)
 
 train_loader = DistributedDataLoader(config.train_data_path, config.batch_size, config.max_seq_len, ddp_rank, ddp_world_size)
 val_loader = DistributedDataLoader(config.val_data_path, config.batch_size, config.max_seq_len, ddp_rank, ddp_world_size)
@@ -473,7 +469,7 @@ fully_shard(model, **fsdp_kwargs)
 assert isinstance(model, FSDPModule)
 
 # Create optimizers
-optimizers = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
+optimizers = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2))
 muon_optimizer, adamw_optimizer = optimizers
 
 if config.compile:
