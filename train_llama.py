@@ -364,7 +364,7 @@ class TrainingConfig:
     eval_only: bool = False
 
     # Data
-    batch_size: int = 4
+    batch_size: int = 16
     max_seq_len: int = 1024
     train_data_path: str = "data/fineweb10B/fineweb_train_*.bin"
     val_data_path: str = "data/fineweb10B/fineweb_val_*.bin"
@@ -382,7 +382,7 @@ class TrainingConfig:
     # Optimizer
     gradient_accumulation_steps: int = 4
     learning_rate: float = 1e-3
-    max_iters: int = 100
+    max_iters: int = 301
     weight_decay: float = 0.0
     beta1: float = 0.8
     beta2: float = 0.95
