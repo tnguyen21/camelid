@@ -281,28 +281,57 @@ class Transformer(nn.Module):
         return logits
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-        all_params = [p for p in self.parameters() if p.requires_grad]
+        # Separate parameters similar to train_modded_gpt.py
+        # Muon for 2D weight matrices in transformer blocks (excluding embeddings)
+        hidden_matrix_params = []
+        # AdamW for embeddings, layer norms, and output head
+        other_params = []
+        
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                # Use Muon for 2D weight matrices in attention and feedforward layers
+                if (param.ndim >= 2 and 
+                    ("layers." in name) and 
+                    ("weight" in name) and 
+                    ("norm" not in name)):
+                    hidden_matrix_params.append(param)
+                else:
+                    # Everything else: embeddings, norms, output head
+                    other_params.append(param)
 
+        # Create Muon optimizer for 2D weight matrices
+        muon_optimizer = torch.optim.Muon(
+            hidden_matrix_params,
+            lr=learning_rate * 50,  # Higher LR for Muon as in modded_gpt
+            momentum=0.95,
+            weight_decay=0.0  # Muon handles regularization differently
+        )
+        
+        # Create AdamW optimizer for other parameters
         fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available
         extra_args = dict(fused=True) if use_fused else dict()
-
-        optimizer = torch.optim.AdamW(
-            all_params,
+        
+        adamw_optimizer = torch.optim.AdamW(
+            other_params,
             lr=learning_rate,
             betas=betas,
-            eps=1e-10,  # Smaller epsilon for distributed training stability
+            eps=1e-10,
             weight_decay=weight_decay,
             **extra_args,
         )
 
         if master_process:
-            num_params = sum(p.numel() for p in all_params)
-            print(f"total params: {len(all_params)} tensors, {num_params:,} parameters")
-            print(f"{learning_rate=}, {weight_decay=}, {betas=}, eps: 1e-10")
+            muon_params = sum(p.numel() for p in hidden_matrix_params)
+            adamw_params = sum(p.numel() for p in other_params)
+            total_params = muon_params + adamw_params
+            print(f"total params: {total_params:,} parameters")
+            print(f"  Muon (2D weights): {len(hidden_matrix_params)} tensors, {muon_params:,} parameters")
+            print(f"  AdamW (others): {len(other_params)} tensors, {adamw_params:,} parameters")
+            print(f"Muon lr: {learning_rate * 50}, AdamW lr: {learning_rate}")
             print(f"using fused AdamW: {use_fused}")
 
-        return optimizer
+        return [muon_optimizer, adamw_optimizer]
 
     @torch.inference_mode()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
@@ -329,7 +358,7 @@ class Transformer(nn.Module):
 class TrainingConfig:
     # I/O
     out_dir: str = "out"
-    eval_interval: int = 2000
+    eval_interval: int = 50
     log_interval: int = 1
     eval_iters: int = 100
     eval_only: bool = False
@@ -366,7 +395,7 @@ class TrainingConfig:
     # System
     device: str = "cuda"
     dtype: str = "bfloat16"
-    compile: bool = True
+    compile: bool = False
 
     def __post_init__(self):
         self.lr_decay_iters = self.max_iters
@@ -390,7 +419,7 @@ def setup_distributed(config):
     master_process = ddp_rank == 0
 
     # assert config.gradient_accumulation_steps % ddp_world_size == 0
-    config.gradient_accumulation_steps //= ddp_world_size
+    config.gradient_accumulation_steps = max(1, config.gradient_accumulation_steps // ddp_world_size)
     tokens_per_iter = config.gradient_accumulation_steps * ddp_world_size * config.batch_size * config.max_seq_len
 
     if master_process:
@@ -443,8 +472,9 @@ fully_shard(model, **fsdp_kwargs)
 
 assert isinstance(model, FSDPModule)
 
-# Create optimizer AFTER FSDP sharding so it sees DTensors
-optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
+# Create optimizers
+optimizers = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2), device_type)
+muon_optimizer, adamw_optimizer = optimizers
 
 if config.compile:
     if master_process:
@@ -478,6 +508,11 @@ def get_lr(step: int):
         w = (1 - x) / config.cooldown_frac
         return w * 1.0 + (1 - w) * 0.1
 
+def get_momentum(step: int):
+    # Momentum warmup for Muon optimizer (similar to modded_gpt)
+    frac = min(step / 300, 1)
+    return (1 - frac) * 0.85 + frac * 0.95
+
 
 if master_process:
     print(f"Python {sys.version}")
@@ -495,8 +530,17 @@ raw_model = model
 
 for iter_num in range(iter_num, config.max_iters):
     lr = get_lr(iter_num) * config.learning_rate if config.decay_lr else config.learning_rate
-    for param_group in optimizer.param_groups:
+    
+    # Update learning rates for both optimizers
+    for param_group in adamw_optimizer.param_groups:
         param_group["lr"] = lr
+    for param_group in muon_optimizer.param_groups:
+        param_group["lr"] = lr * 50  # Higher LR for Muon
+    
+    # Update momentum for Muon optimizer
+    momentum = get_momentum(iter_num)
+    for param_group in muon_optimizer.param_groups:
+        param_group["momentum"] = momentum
 
     if iter_num % config.eval_interval == 0:
         losses = estimate_loss()
@@ -507,6 +551,7 @@ for iter_num in range(iter_num, config.max_iters):
     if iter_num == 0 and config.eval_only:
         break
 
+    loss = None
     for micro_step in range(config.gradient_accumulation_steps):
         is_last_micro = micro_step == config.gradient_accumulation_steps - 1
 
@@ -519,12 +564,14 @@ for iter_num in range(iter_num, config.max_iters):
         loss.backward()
 
         if is_last_micro:
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+            muon_optimizer.step()
+            adamw_optimizer.step()
+            muon_optimizer.zero_grad(set_to_none=True)
+            adamw_optimizer.zero_grad(set_to_none=True)
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
-    if iter_num % config.log_interval == 0 and master_process:
+    if iter_num % config.log_interval == 0 and master_process and loss is not None:
         lossf = loss.item() * config.gradient_accumulation_steps
         print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt * 1000:.2f}ms")
 
