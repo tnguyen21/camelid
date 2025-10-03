@@ -10,7 +10,6 @@ image = (
     )
     .pip_install(
         "numpy",
-        "tqdm",
         "huggingface-hub",
     )
     .add_local_file("train_llama.py", remote_path="/train_llama.py")
