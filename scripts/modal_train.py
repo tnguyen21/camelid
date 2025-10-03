@@ -6,7 +6,7 @@ image = (
     .apt_install("git")
     .run_commands(
         "pip install --upgrade pip",
-        "pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --upgrade",
+        "pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128 --upgrade",
     )
     .pip_install(
         "numpy",
@@ -35,22 +35,17 @@ def _download_fineweb10b(num_train_shards: int) -> None:
 
 
 @app.function(
-    gpu="H100:8",  # 8x H100 to match world_size == 8
+    gpu="H100:4",  # 4x H100 to match world_size == 4
     timeout=24 * 60 * 60,  # 24 hours
-    cpu=32,  # More CPU for 7B model
-    memory=256,  # More memory for 7B model
+    cpu=16,
+    memory=128,
 )
-def run_training(num_train_shards: int = 8):
-    """
-    Download FineWeb shards, then spawn 8 ranks to run the 6.6B Llama2 training code.
-    """
+def run_training(num_train_shards: int):
     import subprocess
 
-    # Download data shards
     _download_fineweb10b(int(num_train_shards))
 
-    # Launch training across 8 GPUs (one process per GPU)
-    result = subprocess.run(["torchrun", "--nproc_per_node=8", "/train_llama.py", "--mixed-precision"], capture_output=True, text=True)
+    result = subprocess.run(["torchrun", "--nproc_per_node=4", "/train_llama.py", "--mixed-precision"], capture_output=True, text=True)
 
     print("STDOUT:")
     print(result.stdout)
@@ -63,7 +58,7 @@ def run_training(num_train_shards: int = 8):
 
 # Convenience function to run locally
 @app.local_entrypoint()
-def main(num_shards: int = 8):
+def main(num_shards: int = 50):
     """
     Run the training with specified parameters
     """
