@@ -358,7 +358,7 @@ class Transformer(nn.Module):
 class TrainingConfig:
     # I/O
     out_dir: str = "out"
-    eval_interval: int = 50
+    eval_interval: int = 100
     log_interval: int = 1
     eval_iters: int = 100
     eval_only: bool = False
@@ -382,7 +382,7 @@ class TrainingConfig:
     # Optimizer
     gradient_accumulation_steps: int = 4
     learning_rate: float = 1e-3
-    max_iters: int = 301
+    max_iters: int = 701
     weight_decay: float = 0.0
     beta1: float = 0.8
     beta2: float = 0.95

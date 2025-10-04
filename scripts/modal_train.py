@@ -45,15 +45,11 @@ def run_training(num_train_shards: int):
 
     _download_fineweb10b(int(num_train_shards))
 
-    result = subprocess.run(["torchrun", "--nproc_per_node=4", "/train_llama.py", "--mixed-precision"], capture_output=True, text=True)
+    result = subprocess.run(["torchrun", "--nproc_per_node=4", "/train_llama.py", "--mixed-precision"], text=True)
 
-    print("STDOUT:")
-    print(result.stdout)
-    print("STDERR:")
-    print(result.stderr)
     print(f"Return code: {result.returncode}")
 
-    return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
+    return {"returncode": result.returncode}
 
 
 # Convenience function to run locally
@@ -64,6 +60,3 @@ def main(num_shards: int = 50):
     """
     result = run_training.remote(num_train_shards=num_shards)
     print(f"Training completed with return code: {result['returncode']}")
-    if result["returncode"] != 0:
-        print("STDERR output:")
-        print(result["stderr"])
