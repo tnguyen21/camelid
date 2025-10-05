@@ -296,15 +296,13 @@ class Transformer(nn.Module):
                     # Everything else: embeddings, norms, output head
                     other_params.append(param)
 
-        # Create Muon optimizer for 2D weight matrices
         muon_optimizer = torch.optim.Muon(
             hidden_matrix_params,
             lr=learning_rate * 50,  # Higher LR for Muon as in modded_gpt
             momentum=0.95,
-            weight_decay=0.0,  # Muon handles regularization differently
+            weight_decay=0.0,
         )
 
-        # Create AdamW optimizer for other parameters
         fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available
         extra_args = dict(fused=True) if use_fused else dict()
@@ -383,7 +381,6 @@ class TrainingConfig:
 
 
 def setup_distributed(config):
-    # Assert we have multiple GPUs available
     assert torch.cuda.is_available(), "CUDA must be available for distributed training"
     assert torch.cuda.device_count() > 1, "Multiple GPUs required for distributed training"
 
@@ -445,7 +442,6 @@ fully_shard(model, **fsdp_kwargs)
 
 assert isinstance(model, FSDPModule)
 
-# Create optimizers
 optimizers = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2))
 muon_optimizer, adamw_optimizer = optimizers
 
@@ -505,13 +501,11 @@ raw_model = model
 for iter_num in range(iter_num, config.max_iters):
     lr = get_lr(iter_num) * config.learning_rate if config.decay_lr else config.learning_rate
 
-    # Update learning rates for both optimizers
     for param_group in adamw_optimizer.param_groups:
         param_group["lr"] = lr
     for param_group in muon_optimizer.param_groups:
         param_group["lr"] = lr * 50  # Higher LR for Muon
 
-    # Update momentum for Muon optimizer
     momentum = get_momentum(iter_num)
     for param_group in muon_optimizer.param_groups:
         param_group["momentum"] = momentum
