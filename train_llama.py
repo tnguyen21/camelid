@@ -133,12 +133,10 @@ class Attention(nn.Module):
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
-        
+
         hdim = args.n_heads * self.head_dim
-        std = 0.5 * (args.dim ** -0.5)
-        bound = (3 ** 0.5) * std
-        self.qkv_w = nn.Parameter(torch.empty(3, hdim, args.dim).uniform_(-bound, bound))
-        
+        self.qkv = nn.Linear(args.dim, 3 * hdim, bias=False)
+
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
         self.attn_dropout = nn.Dropout(args.dropout)
         self.resid_dropout = nn.Dropout(args.dropout)
@@ -156,7 +154,7 @@ class Attention(nn.Module):
     ):
         bsz, seqlen, _ = x.shape
 
-        qkv = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x))
+        qkv = self.qkv(x)
         xq, xk, xv = qkv.view(bsz, seqlen, 3 * self.n_local_heads, self.head_dim).chunk(3, dim=-2)
         xq = xq.contiguous().view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.contiguous().view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
