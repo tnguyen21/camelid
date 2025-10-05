@@ -133,9 +133,13 @@ class Attention(nn.Module):
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
-        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        # merged QKV weights for efficiency (similar to train_modded_gpt.py)
+        hdim = args.n_heads * self.head_dim
+        kv_hdim = self.n_kv_heads * self.head_dim
+        std = 0.5 * (args.dim ** -0.5)
+        bound = (3 ** 0.5) * std
+        # Note: using separate dimensions for q and kv due to GQA (grouped query attention)
+        self.qkv_w = nn.Parameter(torch.empty(hdim + 2 * kv_hdim, args.dim).uniform_(-bound, bound))
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
         self.attn_dropout = nn.Dropout(args.dropout)
         self.resid_dropout = nn.Dropout(args.dropout)
@@ -153,10 +157,15 @@ class Attention(nn.Module):
     ):
         bsz, seqlen, _ = x.shape
 
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        # Single linear operation with merged QKV weights
+        qkv = F.linear(x, self.qkv_w)
+        hdim = self.n_local_heads * self.head_dim
+        kv_hdim = self.n_local_kv_heads * self.head_dim
+        
+        # Split into Q, K, V
+        xq = qkv[:, :, :hdim].view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        xk = qkv[:, :, hdim:hdim + kv_hdim].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xv = qkv[:, :, hdim + kv_hdim:].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
         xk = repeat_kv(xk, self.n_rep)
@@ -381,8 +390,8 @@ class TrainingConfig:
 
     # Optimizer
     gradient_accumulation_steps: int = 4
-    learning_rate: float = 1e-3
-    max_iters: int = 701
+    learning_rate: float = 0.0018
+    max_iters: int = 501
     weight_decay: float = 0.0
     beta1: float = 0.8
     beta2: float = 0.95
