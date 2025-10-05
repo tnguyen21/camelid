@@ -286,32 +286,27 @@ class Transformer(nn.Module):
         hidden_matrix_params = []
         # AdamW for embeddings, layer norms, and output head
         other_params = []
-        
+
         for name, param in self.named_parameters():
             if param.requires_grad:
                 # Use Muon for 2D weight matrices in attention and feedforward layers
-                if (param.ndim >= 2 and 
-                    ("layers." in name) and 
-                    ("weight" in name) and 
-                    ("norm" not in name)):
+                if param.ndim >= 2 and ("layers." in name) and ("weight" in name) and ("norm" not in name):
                     hidden_matrix_params.append(param)
                 else:
                     # Everything else: embeddings, norms, output head
                     other_params.append(param)
 
-        # Create Muon optimizer for 2D weight matrices
         muon_optimizer = torch.optim.Muon(
             hidden_matrix_params,
             lr=learning_rate * 50,  # Higher LR for Muon as in modded_gpt
             momentum=0.95,
-            weight_decay=0.0  # Muon handles regularization differently
+            weight_decay=0.0,
         )
-        
-        # Create AdamW optimizer for other parameters
+
         fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available
         extra_args = dict(fused=True) if use_fused else dict()
-        
+
         adamw_optimizer = torch.optim.AdamW(
             other_params,
             lr=learning_rate,
@@ -333,34 +328,14 @@ class Transformer(nn.Module):
 
         return [muon_optimizer, adamw_optimizer]
 
-    @torch.inference_mode()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        for _ in range(max_new_tokens):
-            idx_cond = idx if idx.size(1) <= self.params.max_seq_len else idx[:, -self.params.max_seq_len :]
-            logits = self(idx_cond)
-            logits = logits[:, -1, :]
-
-            if temperature == 0.0:
-                _, idx_next = torch.topk(logits, k=1, dim=-1)
-            else:
-                logits = logits / temperature
-                if top_k is not None:
-                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                    logits[logits < v[:, [-1]]] = -float("Inf")
-                probs = F.softmax(logits, dim=-1)
-                idx_next = torch.multinomial(probs, num_samples=1)
-
-            idx = torch.cat((idx, idx_next), dim=1)
-        return idx
-
 
 @dataclass
 class TrainingConfig:
     # I/O
     out_dir: str = "out"
     eval_interval: int = 100
-    log_interval: int = 1
-    eval_iters: int = 100
+    log_interval: int = 10
+    eval_iters: int = 50
     eval_only: bool = False
 
     # Data
@@ -382,7 +357,7 @@ class TrainingConfig:
     # Optimizer
     gradient_accumulation_steps: int = 4
     learning_rate: float = 1e-3
-    max_iters: int = 701
+    max_iters: int = 201
     weight_decay: float = 0.0
     beta1: float = 0.8
     beta2: float = 0.95
@@ -406,7 +381,6 @@ class TrainingConfig:
 
 
 def setup_distributed(config):
-    # Assert we have multiple GPUs available
     assert torch.cuda.is_available(), "CUDA must be available for distributed training"
     assert torch.cuda.device_count() > 1, "Multiple GPUs required for distributed training"
 
@@ -468,7 +442,6 @@ fully_shard(model, **fsdp_kwargs)
 
 assert isinstance(model, FSDPModule)
 
-# Create optimizers
 optimizers = model.configure_optimizers(config.weight_decay, config.learning_rate, (config.beta1, config.beta2))
 muon_optimizer, adamw_optimizer = optimizers
 
@@ -504,6 +477,7 @@ def get_lr(step: int):
         w = (1 - x) / config.cooldown_frac
         return w * 1.0 + (1 - w) * 0.1
 
+
 def get_momentum(step: int):
     # Momentum warmup for Muon optimizer (similar to modded_gpt)
     frac = min(step / 300, 1)
@@ -526,14 +500,12 @@ raw_model = model
 
 for iter_num in range(iter_num, config.max_iters):
     lr = get_lr(iter_num) * config.learning_rate if config.decay_lr else config.learning_rate
-    
-    # Update learning rates for both optimizers
+
     for param_group in adamw_optimizer.param_groups:
         param_group["lr"] = lr
     for param_group in muon_optimizer.param_groups:
         param_group["lr"] = lr * 50  # Higher LR for Muon
-    
-    # Update momentum for Muon optimizer
+
     momentum = get_momentum(iter_num)
     for param_group in muon_optimizer.param_groups:
         param_group["momentum"] = momentum
