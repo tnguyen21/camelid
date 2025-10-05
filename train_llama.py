@@ -138,9 +138,6 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(args.dim, 3 * hdim, bias=False)
 
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
-        self.attn_dropout = nn.Dropout(args.dropout)
-        self.resid_dropout = nn.Dropout(args.dropout)
-        self.dropout = args.dropout
 
         mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
         mask = torch.triu(mask, diagonal=1)
@@ -172,17 +169,15 @@ class Attention(nn.Module):
         assert hasattr(self, "mask")
         scores = scores + self.mask[:, :, :seqlen, :seqlen]
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        scores = self.attn_dropout(scores)
         output = torch.matmul(scores, xv)
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         output = self.wo(output)
-        output = self.resid_dropout(output)
         return output
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int, multiple_of: int, dropout: float):
+    def __init__(self, dim: int, hidden_dim: int, multiple_of: int):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = 4 * dim
@@ -191,10 +186,9 @@ class FeedForward(nn.Module):
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
 class TransformerBlock(nn.Module):
@@ -208,7 +202,6 @@ class TransformerBlock(nn.Module):
             dim=args.dim,
             hidden_dim=args.hidden_dim,
             multiple_of=args.multiple_of,
-            dropout=args.dropout,
         )
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
@@ -234,7 +227,6 @@ class Transformer(nn.Module):
         self.n_layers = params.n_layers
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
-        self.dropout = nn.Dropout(params.dropout)
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
@@ -265,7 +257,6 @@ class Transformer(nn.Module):
     def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
-        h = self.dropout(h)
         freqs_cos = self.freqs_cos[:seqlen]
         freqs_sin = self.freqs_sin[:seqlen]
 
