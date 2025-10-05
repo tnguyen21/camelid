@@ -123,6 +123,11 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return x[:, :, :, None, :].expand(bs, slen, n_kv_heads, n_rep, head_dim).reshape(bs, slen, n_kv_heads * n_rep, head_dim)
 
 
+def norm(x: torch.Tensor) -> torch.Tensor:
+    """RMS normalization function for QK normalization."""
+    return F.rms_norm(x, (x.size(-1),))
+
+
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -141,9 +146,11 @@ class Attention(nn.Module):
         # Note: using separate dimensions for q and kv due to GQA (grouped query attention)
         self.qkv_w = nn.Parameter(torch.empty(hdim + 2 * kv_hdim, args.dim).uniform_(-bound, bound))
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+        self.wo.weight.detach().zero_()  # zero init for better residual learning
         self.attn_dropout = nn.Dropout(args.dropout)
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
+
 
         mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
         mask = torch.triu(mask, diagonal=1)
@@ -166,6 +173,9 @@ class Attention(nn.Module):
         xq = qkv[:, :, :hdim].view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = qkv[:, :, hdim:hdim + kv_hdim].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = qkv[:, :, hdim + kv_hdim:].view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
+        # QK normalization for improved training stability
+        xq, xk = norm(xq), norm(xk)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
         xk = repeat_kv(xk, self.n_rep)
@@ -368,7 +378,7 @@ class TrainingConfig:
     # I/O
     out_dir: str = "out"
     eval_interval: int = 100
-    log_interval: int = 1
+    log_interval: int = 10
     eval_iters: int = 100
     eval_only: bool = False
 
@@ -390,8 +400,8 @@ class TrainingConfig:
 
     # Optimizer
     gradient_accumulation_steps: int = 4
-    learning_rate: float = 0.0018
-    max_iters: int = 501
+    learning_rate: float = 1e-3
+    max_iters: int = 201
     weight_decay: float = 0.0
     beta1: float = 0.8
     beta2: float = 0.95
