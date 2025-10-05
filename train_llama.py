@@ -22,6 +22,10 @@ import torch.nn.functional as F
 from torch.distributed import destroy_process_group, init_process_group
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, FSDPModule
 from torch.utils.checkpoint import checkpoint
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+
+# Compile flex_attention once at module level
+flex_attention_compiled = torch.compile(flex_attention)
 
 
 def _load_data_shard(filename):
@@ -139,9 +143,17 @@ class Attention(nn.Module):
 
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
-        mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
-        mask = torch.triu(mask, diagonal=1)
-        self.register_buffer("mask", mask)
+    def _create_causal_block_mask(self, batch_size: int, seq_len: int):
+        """Create a simple causal block mask for FlexAttention."""
+        def score_mod(score, b, h, q_idx, kv_idx):
+            return torch.where(q_idx >= kv_idx, score, -float("inf"))
+        
+        def mask_mod(b, h, q_idx, kv_idx):
+            return q_idx >= kv_idx
+        
+        block_mask = create_block_mask(mask_mod, B=batch_size, H=None, 
+                                     Q_LEN=seq_len, KV_LEN=seq_len)
+        return score_mod, block_mask
 
     def forward(
         self,
@@ -165,11 +177,11 @@ class Attention(nn.Module):
         xk = xk.transpose(1, 2)
         xv = xv.transpose(1, 2)
 
-        scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
-        assert hasattr(self, "mask")
-        scores = scores + self.mask[:, :, :seqlen, :seqlen]
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, xv)
+        # Create causal block mask for FlexAttention
+        score_mod, block_mask = self._create_causal_block_mask(bsz, seqlen)
+        
+        # Use compiled FlexAttention instead of manual attention computation
+        output = flex_attention_compiled(xq, xk, xv, score_mod=score_mod, block_mask=block_mask)
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         output = self.wo(output)
@@ -332,7 +344,7 @@ class TrainingConfig:
     eval_only: bool = False
 
     # Data
-    batch_size: int = 16
+    batch_size: int = 8
     max_seq_len: int = 1024
     train_data_path: str = "data/fineweb10B/fineweb_train_*.bin"
     val_data_path: str = "data/fineweb10B/fineweb_val_*.bin"
@@ -363,7 +375,7 @@ class TrainingConfig:
     # System
     device: str = "cuda"
     dtype: str = "bfloat16"
-    compile: bool = False
+    compile: bool = True
 
     def __post_init__(self):
         self.lr_decay_iters = self.max_iters
@@ -441,7 +453,7 @@ muon_optimizer, adamw_optimizer = optimizers
 if config.compile:
     if master_process:
         print("compiling the model... (takes a ~minute)")
-    model = torch.compile(model)
+    model = torch.compile(model, dynamic=False)
 
 
 @torch.no_grad()
@@ -489,7 +501,6 @@ if master_process:
 # training loop
 X, Y = train_loader.next_batch()
 t0 = time.time()
-raw_model = model
 
 for iter_num in range(iter_num, config.max_iters):
     lr = get_lr(iter_num) * config.learning_rate if config.decay_lr else config.learning_rate
