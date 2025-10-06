@@ -24,10 +24,6 @@ from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, FSDPModule
 from torch.utils.checkpoint import checkpoint
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
-# Compile flex_attention once at module level
-flex_attention_compiled = torch.compile(flex_attention)
-
-
 def _load_data_shard(filename):
     with open(filename, "rb") as f:
         header = np.frombuffer(f.read(256 * 4), dtype=np.int32)
@@ -140,20 +136,23 @@ class Attention(nn.Module):
 
         hdim = args.n_heads * self.head_dim
         self.qkv = nn.Linear(args.dim, 3 * hdim, bias=False)
-
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
-
-    def _create_causal_block_mask(self, batch_size: int, seq_len: int):
-        """Create a simple causal block mask for FlexAttention."""
-        def score_mod(score, b, h, q_idx, kv_idx):
-            return torch.where(q_idx >= kv_idx, score, -float("inf"))
         
+        # Pre-create and cache the block mask
         def mask_mod(b, h, q_idx, kv_idx):
             return q_idx >= kv_idx
         
-        block_mask = create_block_mask(mask_mod, B=batch_size, H=None, 
-                                     Q_LEN=seq_len, KV_LEN=seq_len)
-        return score_mod, block_mask
+        # Create once for max dimensions - will work for smaller batches/seqs too
+        self.block_mask = create_block_mask(
+            mask_mod, 
+            B=None,  # None means works for any batch size
+            H=None,  # None means works for any number of heads
+            Q_LEN=args.max_seq_len, 
+            KV_LEN=args.max_seq_len
+        )
+        
+        # Pre-compile flex_attention for this instance
+        self.flex_attention_compiled = torch.compile(flex_attention)
 
     def forward(
         self,
@@ -177,11 +176,16 @@ class Attention(nn.Module):
         xk = xk.transpose(1, 2)
         xv = xv.transpose(1, 2)
 
-        # Create causal block mask for FlexAttention
-        score_mod, block_mask = self._create_causal_block_mask(bsz, seqlen)
+        # Simple score_mod - defined inline
+        def score_mod(score, b, h, q_idx, kv_idx):
+            return torch.where(q_idx >= kv_idx, score, -float("inf"))
         
-        # Use compiled FlexAttention instead of manual attention computation
-        output = flex_attention_compiled(xq, xk, xv, score_mod=score_mod, block_mask=block_mask)
+        # Use cached block_mask and compiled FlexAttention
+        output = self.flex_attention_compiled(
+            xq, xk, xv, 
+            score_mod=score_mod, 
+            block_mask=self.block_mask
+        )
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         output = self.wo(output)
