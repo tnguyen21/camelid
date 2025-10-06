@@ -128,9 +128,8 @@ class Attention(nn.Module):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         assert args.n_heads % self.n_kv_heads == 0
-        model_parallel_size = 1
-        self.n_local_heads = args.n_heads // model_parallel_size
-        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+        self.n_local_heads = args.n_heads
+        self.n_local_kv_heads = self.n_kv_heads
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
@@ -365,7 +364,7 @@ class TrainingConfig:
 
     # Optimizer
     gradient_accumulation_steps: int = 4
-    learning_rate: float = 0.0009
+    learning_rate: float = 3e-4
     max_iters: int = 101
     weight_decay: float = 0.0
     beta1: float = 0.8
