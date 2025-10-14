@@ -1,4 +1,4 @@
-# camelid [codename]
+# modded-llama2
 
 speedrun of llama2 7B training run over fineweb
 
